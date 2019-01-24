@@ -2761,6 +2761,78 @@ out:
 	return ret;
 }
 
+
+bool subscribe_extranonce(struct pool *pool)
+{
+	json_t *val = NULL, *res_val, *err_val;
+	char s[RBUFSIZE], *sret = NULL;
+	json_error_t err;
+	bool ret = false;
+
+	sprintf(s, "{\"id\": %d, \"method\": \"mining.extranonce.subscribe\", \"params\": []}",
+		swork_id++);
+
+	if (!stratum_send(pool, s, strlen(s)))
+		return ret;
+
+	/* Parse all data in the queue and anything left should be the response */
+	while (42) {
+		if (!socket_full(pool, DEFAULT_SOCKWAIT / 30)) {
+			applog(LOG_DEBUG, "Timed out waiting for response extranonce.subscribe");
+			/* some pool doesnt send anything, so this is normal */
+			ret = true;
+			goto out;
+		}
+
+		sret = recv_line(pool);
+		if (!sret)
+			return ret;
+		if (parse_method(pool, sret))
+			free(sret);
+		else
+			break;
+	}
+
+	val = JSON_LOADS(sret, &err);
+	free(sret);
+	res_val = json_object_get(val, "result");
+	err_val = json_object_get(val, "error");
+
+	if (!res_val || json_is_false(res_val) || (err_val && !json_is_null(err_val)))  {
+		char *ss;
+
+		if (err_val) {
+			ss = __json_array_string(err_val, 1);
+			if (!ss)
+				ss = (char *)json_string_value(err_val);
+			if (ss && (strcmp(ss, "Method 'subscribe' not found for service 'mining.extranonce'") == 0)) {
+				applog(LOG_INFO, "Cannot subscribe to mining.extranonce for pool %d", pool->pool_no);
+				ret = true;
+				goto out;
+			}
+			if (ss && (strcmp(ss, "Unrecognized request provided") == 0)) {
+				applog(LOG_INFO, "Cannot subscribe to mining.extranonce for pool %d", pool->pool_no);
+				ret = true;
+				goto out;
+			}
+			ss = json_dumps(err_val, JSON_INDENT(3));
+		}
+		else
+			ss = strdup("(unknown reason)");
+		applog(LOG_INFO, "Pool %d JSON extranonce subscribe failed: %s", pool->pool_no, ss);
+		free(ss);
+
+		goto out;
+	}
+
+	ret = true;
+	applog(LOG_INFO, "Stratum extranonce subscribe for pool %d", pool->pool_no);
+
+out:
+	json_decref(val);
+	return ret;
+}
+
 bool auth_stratum(struct pool *pool)
 {
 	json_t *val = NULL, *res_val, *err_val;
@@ -3403,6 +3475,8 @@ bool restart_stratum(struct pool *pool)
 	if (pool->stratum_active)
 		suspend_stratum(pool);
 	if (!initiate_stratum(pool))
+		goto out;
+	if (pool->extranonce_subscribe && !subscribe_extranonce(pool))
 		goto out;
 	if (!auth_stratum(pool))
 		goto out;
